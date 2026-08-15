@@ -10,10 +10,8 @@ const PLUGIN_ID = "@dsh-external/dsh-ocr"
 const CLIENT_EXTERNALS = [
   'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client',
   'cordis',
-  '@deepseek-ai/dsh-client-ui-slots',
   '@deepseek-ai/dsh-client-runtime/client',
-  '@deepseek-ai/dsh-client-locale',
-  '@deepseek-ai/dsh-client-ui-conversation/client',
+  '@deepseek-ai/dsh-client-ui-settings-plugins/client',
 ]
 
 const clientBundle: UserConfig = {

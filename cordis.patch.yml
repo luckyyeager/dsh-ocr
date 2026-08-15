@@ -36,7 +36,6 @@
       config:
         enabled: true
         toolEnabled: true
-        panelEnabled: true
         defaultProvider: mock
         timeoutMs: 30000
         maxImageBytes: 20971520
