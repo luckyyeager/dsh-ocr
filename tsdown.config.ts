@@ -1,0 +1,43 @@
+import type { UserConfig } from 'tsdown'
+
+const PLUGIN_ID = "@dsh-external/dsh-ocr"
+
+/**
+ * 浏览器运行时由 __ModuleLoader__ 解析的外部模块：
+ * - react / react-dom：平台 seed；
+ * - 其余 dsh client 包：shell 静态模块（或仅类型导入）。
+ */
+const CLIENT_EXTERNALS = [
+  'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client',
+  'cordis',
+  '@deepseek-ai/dsh-client-ui-slots',
+  '@deepseek-ai/dsh-client-runtime/client',
+  '@deepseek-ai/dsh-client-locale',
+  '@deepseek-ai/dsh-client-ui-conversation/client',
+]
+
+const clientBundle: UserConfig = {
+  entry: { client: 'src/client/index.tsx' },
+  outDir: 'lib',
+  format: 'cjs',
+  platform: 'browser',
+  dts: false,
+  sourcemap: true,
+  clean: false,
+  define: {
+    'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV ?? 'production'),
+  },
+  deps: {
+    neverBundle: [...CLIENT_EXTERNALS],
+    alwaysBundle: (id: string) => !CLIENT_EXTERNALS.includes(id),
+  },
+  outputOptions: {
+    entryFileNames: 'client.js',
+    banner: 'window.__ModuleLoader__.load({ id: ' + JSON.stringify(PLUGIN_ID) + ', factory: (require) => {',
+    footer: 'return module.exports; } });',
+    intro: 'var module = { exports: {} }; var exports = module.exports;',
+    codeSplitting: false,
+  },
+}
+
+export default [clientBundle] satisfies UserConfig[]

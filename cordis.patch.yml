@@ -1,0 +1,43 @@
+# @dsh-external/dsh-ocr — 外置第三方 OCR 组合包 patch。
+# 一个 insert 叠加到 profile 根：本插件行 + 默认配置（defaultProvider=mock，
+# 开箱安全自检；配置真实供应商后即接入真实 OCR）。
+#
+# 供应商配置示例（用户在自己的 $DSH_HOME/profiles/<profile>/cordis.patch.yml
+# 覆盖本行 config，后者整段替换、逐字段生效）：
+#
+# - id: dsh-ocr
+#   config:
+#     defaultProvider: baidu
+#     providers:
+#       baidu:
+#         apiKey: <你的 API Key>
+#         secretKey: <你的 Secret Key>
+#
+# 通用 REST 接入（自建/私有化/开源服务）：
+#
+# - id: dsh-ocr
+#   config:
+#     defaultProvider: my-ocr
+#     providers:
+#       my-ocr:
+#         endpoint: https://ocr.example.com/recognize
+#         auth: header          # none | header | query | token-exchange
+#         apiKey: <你的 Key>    # header 模式：Authorization 头（headerName 可改）
+#         encoding: json        # json | form | raw
+#         template: '{"image":"${image_base64}","lang":"${lang|CHN_ENG}"}'
+#         textPath: data.text   # 简化 JSONPath；a[*].b 收集数组全部元素
+#
+# 内置预设：baidu（百度智能云通用文字识别）、paddleocr（本地
+# PaddleOCR HubServing）、generic（通用 JSON POST）、mock（无网络自检）。
+
+- insert:
+    - id: dsh-ocr
+      name: '@dsh-external/dsh-ocr'
+      config:
+        enabled: true
+        toolEnabled: true
+        panelEnabled: true
+        defaultProvider: mock
+        timeoutMs: 30000
+        maxImageBytes: 20971520
+        providers: {}
