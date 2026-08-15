@@ -185,7 +185,12 @@ export function apply(ctx: Context, config: Config): void {
             res.setHeader('Allow', 'GET')
             return json(res, 405, { ok: false, code: 'method', message: 'GET only' })
           }
-          return json(res, 200, { ok: true, ...providerList(resolved) })
+          return json(res, 200, {
+            ok: true,
+            ...providerList(resolved),
+            // 全局视图可见性探针：新会话的 tools schema 是否包含 ocr。
+            toolRegistered: ctx.tools.get('ocr') !== undefined,
+          })
         },
       })
       const disposeRecognize = ctx.webServer.register({
