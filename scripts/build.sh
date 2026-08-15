@@ -49,6 +49,7 @@ link react react
 link @deepseek-ai/dsh-tools @deepseek-ai/dsh-tools
 link @deepseek-ai/dsh-system-prompt @deepseek-ai/dsh-system-prompt
 link @deepseek-ai/dsh-settings @deepseek-ai/dsh-settings
+link @deepseek-ai/dsh-host-webserver @deepseek-ai/dsh-host-webserver
 link @deepseek-ai/dsh-client-runtime @deepseek-ai/dsh-client-runtime
 link @deepseek-ai/dsh-client-locale @deepseek-ai/dsh-client-locale
 link @deepseek-ai/dsh-client-ui-settings-plugins @deepseek-ai/dsh-client-ui-settings-plugins

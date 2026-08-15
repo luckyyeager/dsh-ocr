@@ -5,16 +5,21 @@
  * - 注册模型可调用的 `ocr` 工具（defineTool + systemPrompt 指引），默认全局
  *   开启，可在设置面板关闭（enabled / toolEnabled）。
  * - 通过 `installSettingsSection` 把插件 Config 注册成 settings 命名空间
- *   `dsh-ocr`：设置面板（settings.plugin.item 卡片）实时读写，改动即时生效，
- *   apiKey / secretKey 以 role('secret') 标记，字面值永不下发浏览器。
+ *   `dsh-ocr`，改动即时生效；apiKey / secretKey 以 role('secret') 标记。
+ * - 设置面板数据桥（GET/POST /api/ocr/settings）：apiproxy 的 Web 客户端
+ *   命名空间白名单不含本插件（插件自暴露是官方 deferred work），外置插件
+ *   无法改白名单，故卡片经此同源桥读写——服务端直读直写 settings 命名空间
+ *   （服务端不受白名单门禁），GET 返回 redacted 视图，密钥字面值永不下发。
  * - provider 层见 ./engine.ts：通用 REST 适配器 + 预设（baidu /
  *   paddleocr / generic / mock），绝大多数第三方 OCR 服务纯配置接入。
  */
 import type { Context } from 'cordis'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { installSettingsSection, SettingsConflictError, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import z from 'schemastery'
 import {
   DEFAULT_FIELDS,
@@ -25,7 +30,7 @@ import {
 } from './engine.js'
 
 export const name = '@dsh-external/dsh-ocr'
-export const inject = ['tools', 'systemPrompt']
+export const inject = ['tools', 'systemPrompt', 'webServer']
 
 /** Settings 命名空间（client 卡片同名字符串，两侧各自拼写）。 */
 export const OCR_SETTINGS_NAMESPACE = 'dsh-ocr'
@@ -173,6 +178,110 @@ export function apply(ctx: Context, config: Config): void {
     onChange: rebuild,
   })
   rebuild()
+
+  // ── 设置面板数据桥（同源 API，服务端直读直写 settings 命名空间） ─────────
+  const json = (res: ServerResponse, code: number, body: unknown): void => {
+    res.statusCode = code
+    res.setHeader('Content-Type', 'application/json; charset=utf-8')
+    res.setHeader('Cache-Control', 'no-store')
+    res.end(JSON.stringify(body))
+  }
+
+  const readJsonBody = (req: IncomingMessage, maxBytes: number): Promise<unknown> =>
+    new Promise((resolve, reject) => {
+      const chunks: Buffer[] = []
+      let size = 0
+      req.on('data', (chunk: Buffer) => {
+        size += chunk.length
+        if (size > maxBytes) {
+          reject(new Error('request body too large'))
+          req.destroy()
+          return
+        }
+        chunks.push(chunk)
+      })
+      req.on('end', () => {
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error(String(error)))
+        }
+      })
+      req.on('error', reject)
+    })
+
+  /** redacted 命名空间视图；未挂载/未注册时 status 非 ready。 */
+  const namespaceView = (): Record<string, unknown> => {
+    const settings = ctx.get('settings')
+    if (settings === undefined) return { status: 'unavailable' }
+    const descriptor = settings
+      .describe({ redactSecrets: true })
+      .find((entry) => String(entry.ns) === OCR_SETTINGS_NAMESPACE)
+    if (descriptor === undefined) return { status: 'unavailable' }
+    return {
+      status: 'ready',
+      ns: OCR_SETTINGS_NAMESPACE,
+      value: descriptor.value,
+      base: descriptor.base,
+      user: descriptor.user,
+      applies: descriptor.applies,
+      revision: descriptor.revision,
+      writable: true,
+      secrets: (descriptor.secrets ?? []).map((secret) => ({ path: [...secret.path], set: secret.set })),
+    }
+  }
+
+  ctx.effect(() => {
+    const disposeRoute = ctx.webServer.register({
+      kind: 'exact',
+      path: '/api/ocr/settings',
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        if (req.method === 'GET') {
+          return json(res, 200, namespaceView())
+        }
+        if (req.method === 'POST') {
+          const settings = ctx.get('settings')
+          if (settings === undefined) return json(res, 503, { ok: false, code: 'unavailable', message: 'settings service not mounted' })
+          let body: Record<string, unknown>
+          try {
+            body = (await readJsonBody(req, 512 * 1024)) as Record<string, unknown>
+          } catch (error) {
+            return json(res, 400, { ok: false, code: 'bad-body', message: error instanceof Error ? error.message : String(error) })
+          }
+          const ops = body.ops
+          if (!Array.isArray(ops) || ops.length === 0 || ops.length > 64) {
+            return json(res, 400, { ok: false, code: 'bad-ops', message: 'ops must be a non-empty array of at most 64 path edits' })
+          }
+          for (const op of ops as Array<Record<string, unknown>>) {
+            if (op.op !== 'set' && op.op !== 'unset') return json(res, 400, { ok: false, code: 'bad-ops', message: 'op must be set or unset' })
+            if (!Array.isArray(op.path) || op.path.length === 0 || !op.path.every((segment) => typeof segment === 'string')) {
+              return json(res, 400, { ok: false, code: 'bad-ops', message: 'op.path must be a non-empty string array' })
+            }
+            if (op.op === 'set' && op.value === undefined) {
+              return json(res, 400, { ok: false, code: 'bad-ops', message: 'set op requires a value' })
+            }
+          }
+          const expectedRevision = typeof body.expectedRevision === 'number' ? body.expectedRevision : undefined
+          try {
+            await settings.mutate(
+              settingsNamespace(OCR_SETTINGS_NAMESPACE),
+              ops as never,
+              expectedRevision,
+            )
+          } catch (error) {
+            if (error instanceof SettingsConflictError) {
+              return json(res, 409, { ok: false, code: 'conflict', message: error.message, ...namespaceView() })
+            }
+            return json(res, 400, { ok: false, code: 'rejected', message: error instanceof Error ? error.message : String(error) })
+          }
+          return json(res, 200, { ok: true, ...namespaceView() })
+        }
+        res.setHeader('Allow', 'GET, POST')
+        return json(res, 405, { ok: false, code: 'method', message: 'GET or POST only' })
+      },
+    })
+    return disposeRoute
+  }, '@dsh-external/dsh-ocr: settings bridge')
 
   ctx.logger?.info?.(`[${name}] ocr ready: tool=${current().enabled && current().toolEnabled} default=${current().defaultProvider}`)
 }

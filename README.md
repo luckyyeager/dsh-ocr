@@ -13,7 +13,7 @@ OCR 卡片），改动即时生效。provider 层是通用 REST 适配器——�
 
 ```bash
 # 树外安装（写入 profile package.json + bundles，重启后照常装配）
-dsh plugin --profile web add /path/to/dsh-external-dsh-ocr-0.0.2.tgz
+dsh plugin --profile web add /path/to/dsh-external-dsh-ocr-0.0.3.tgz
 ```
 
 或在注入器环境内热装配：`dev_inject_plugin <本目录>`（免重启生效）。
@@ -61,6 +61,11 @@ dsh plugin --profile web add /path/to/dsh-external-dsh-ocr-0.0.2.tgz
 `$DSH_HOME/profiles/<profile>/cordis.patch.yml` 覆盖 `dsh-ocr` 行（示例见
 `cordis.patch.yml` 头部注释）。
 
+> 说明：apiproxy 对 Web 客户端的 settings 命名空间有硬编码白名单（外置插件
+> 无法注册），卡片数据经本插件的同源桥 **GET/POST `/api/ocr/settings`** 读写，
+> 服务端直读直写命名空间（不受白名单门禁），GET 返回 redacted 视图 + secrets
+> 侧录，密钥字面值永不下发浏览器。
+
 ## 工具用法（模型面）
 
 ```
@@ -76,7 +81,7 @@ ocr(image, provider?, lang?)
 ```bash
 npm run build           # host：探测已安装 dsh npm checkout（DSH_CLI 可覆盖）→ junction 依赖 → tsc
 npm run build:client    # client：tsdown 打包 lib/client.js
-npm pack                # 产出 dsh-external-dsh-ocr-0.0.2.tgz
+npm pack                # 产出 dsh-external-dsh-ocr-0.0.3.tgz
 ```
 
 ## 目录

@@ -2,13 +2,13 @@
  * @dsh-external/dsh-ocr — client half.
  *
  * OcrSettingsCard：注册进 `settings.plugin.item`（设置 > 插件 页的配置卡片）。
- * 读写 host 侧 `dsh-ocr` settings 命名空间：
- * - 顶层开关/标量（enabled、toolEnabled、defaultProvider、timeoutMs、
- *   maxImageBytes）经 settingsScope.set/unset 直接提交；
- * - 供应商嵌套字段经 connection API 的 settings.mutate 按 path 写入，
- *   保存按钮一次性提交该供应商的 staged 编辑；apiKey / secretKey 为
- *   role('secret') 写only字段——字面值永不下发浏览器，输入框始终留空，
- *   仅以 user 层存在性显示"已配置"徽标。
+ * 数据层经 host 同源桥（GET/POST /api/ocr/settings）读写 `dsh-ocr`
+ * settings 命名空间——apiproxy 的 Web 客户端命名空间白名单不含本插件，
+ * 故不走设置 RPC：
+ * - 顶层开关/标量：{op:'set'|'unset', path:[field]} 直写；
+ * - 供应商嵌套字段：保存按钮一次性提交该供应商的 staged 编辑（path ops）；
+ * - apiKey / secretKey 为 role('secret') 写only字段——字面值永不下发浏览器，
+ *   输入框始终留空，仅以 user 层存在性显示"已配置"徽标。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -17,7 +17,6 @@ import type { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 
 const NS = 'ocr'
-const SETTINGS_NS = 'dsh-ocr'
 
 /** 内置预设 id（与 host engine.PRESETS 保持一致；仅用于下拉候选）。 */
 const PRESET_IDS = ['baidu', 'paddleocr', 'generic', 'mock'] as const
@@ -82,7 +81,7 @@ const zh = {
   delete: '删除',
   deleting: '删除中…',
   deleteConfirm: '删除该供应商的用户配置？',
-  unavailable: '设置不可用（host 未挂载设置服务）',
+  unavailable: 'OCR 设置不可用（host 未提供 dsh-ocr 设置桥）',
   clear: '留空保存 = 清除该字段（回落预设/默认值）',
 } as const
 
@@ -123,7 +122,7 @@ const en = {
   delete: 'Delete',
   deleting: 'Deleting…',
   deleteConfirm: 'Delete this provider’s user configuration?',
-  unavailable: 'Settings unavailable (no settings service on host)',
+  unavailable: 'OCR settings unavailable (host does not serve the dsh-ocr settings bridge)',
   clear: 'Blank + save = clear the field (falls back to preset/default)',
 } as const
 
@@ -176,6 +175,8 @@ interface OcrCardState {
   writable: boolean
   value: Record<string, any> | null
   user: Record<string, any> | null
+  /** role('secret') 字段的脱敏侧录：path + 是否持有值（"已配置"徽标数据源）。 */
+  secrets: Array<{ path: string[]; set: boolean }>
   revision: number | undefined
   saving: boolean
   failed: boolean
@@ -267,9 +268,13 @@ function OcrSettingsCard({ t, useOcrCard, setField, unsetField, saveProvider, de
   if (state.status !== 'ready' || value === null) return null
 
   const hasConfigured = (key: string): boolean => {
-    const entry = user?.providers?.[activeId] as Record<string, any> | undefined
-    return entry?.[key] !== undefined
+    const path = ['providers', activeId, key]
+    return state.secrets.some((secret: { path: string[]; set: boolean }) => secret.set && secret.path.length === path.length && secret.path.every((segment: string, index: number) => segment === path[index]))
   }
+
+  const hasAnyUserConfig = (): boolean =>
+    Object.keys(user?.providers?.[activeId] ?? {}).length > 0 ||
+    state.secrets.some((secret: { path: string[]; set: boolean }) => secret.set && secret.path[0] === 'providers' && secret.path[1] === activeId)
 
   const onSaveProvider = async (): Promise<void> => {
     const ok = await saveProvider(activeId, draft)
@@ -479,7 +484,7 @@ function OcrSettingsCard({ t, useOcrCard, setField, unsetField, saveProvider, de
           <button
             type="button"
             className="OcrS_btn OcrS_btnDanger"
-            disabled={disabled || state.saving || Object.keys(user?.providers?.[activeId] ?? {}).length === 0}
+            disabled={disabled || state.saving || !hasAnyUserConfig()}
             onClick={() => void onDeleteProvider()}
           >
             {state.saving ? t('deleting') : t('delete')}
@@ -506,18 +511,9 @@ interface ClientContext extends Context {
   locale: {
     register(namespace: string, dict: Record<string, unknown>): unknown
   }
-  settingsScope: {
-    bind(spec: { namespace: string }): {
-      getSnapshot(): any
-      subscribe(listener: () => void): () => void
-      set(field: string, value: unknown): Promise<void>
-      unset(field: string): Promise<void>
-    }
-  }
-  get(service: 'connection'): { api: { settings: { mutate(input: any): Promise<any> } } }
 }
 
-export const inject = ['slots', 'locale', 'connection', 'settingsScope']
+export const inject = ['slots', 'locale']
 
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => {
@@ -525,92 +521,114 @@ export function apply(ctx: ClientContext): void {
     return () => {}
   }, '@dsh-external/dsh-ocr: dictionaries')
 
-  const scope = ctx.settingsScope.bind({ namespace: SETTINGS_NS })
-  const { api } = ctx.get('connection')
+  // 数据层：经 host 同源桥读写（apiproxy 白名单不含 dsh-ocr，设置命名空间
+  // 不走 RPC），GET 拉 redacted 视图，POST 提交 path-addressed ops。
+  let snapshot: OcrCardState = {
+    status: 'loading',
+    writable: false,
+    value: null,
+    user: null,
+    secrets: [],
+    revision: undefined,
+    saving: false,
+    failed: false,
+  }
+  const store = createStore<OcrCardState>(() => ({ ...snapshot }))
 
-  let saving = false
-  let failed = false
-
-  const store = createStore<OcrCardState>(() => {
-    const snapshot = scope.getSnapshot()
-    return {
-      status: snapshot.status,
-      writable: snapshot.writable,
-      value: snapshot.value ?? null,
-      user: snapshot.user ?? null,
-      revision: snapshot.revision,
-      saving,
-      failed,
+  const acceptView = (body: any): void => {
+    if (body?.status === 'ready') {
+      snapshot = {
+        ...snapshot,
+        status: 'ready',
+        writable: body.writable !== false,
+        value: body.value ?? {},
+        user: body.user ?? {},
+        secrets: Array.isArray(body.secrets) ? body.secrets : [],
+        revision: typeof body.revision === 'number' ? body.revision : undefined,
+      }
+    } else {
+      snapshot = { ...snapshot, status: 'unavailable', writable: false, value: null, user: null, secrets: [] }
     }
-  })
-  const offScope = scope.subscribe(() => store.emit())
-  ctx.effect(() => () => offScope(), '@dsh-external/dsh-ocr: settings subscription')
-
-  const withSaveFlag = async <T,>(run: () => Promise<T>): Promise<T> => {
-    saving = true
-    failed = false
     store.emit()
+  }
+
+  const load = async (): Promise<void> => {
     try {
-      const result = await run()
-      failed = false
-      return result
+      const res = await fetch('/api/ocr/settings', { cache: 'no-store' })
+      if (!res.ok) throw new Error(String(res.status))
+      acceptView(await res.json())
     } catch {
-      failed = true
-      throw new Error('save failed')
-    } finally {
-      saving = false
+      snapshot = { ...snapshot, status: 'unavailable', writable: false }
       store.emit()
     }
   }
 
+  const writeOps = async (ops: unknown[]): Promise<boolean> => {
+    if (ops.length === 0) return true
+    snapshot = { ...snapshot, saving: true, failed: false }
+    store.emit()
+    try {
+      const res = await fetch('/api/ocr/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ops,
+          ...(snapshot.revision === undefined ? {} : { expectedRevision: snapshot.revision }),
+        }),
+      })
+      const body = await res.json()
+      if (body?.ok === true) {
+        acceptView(body)
+        snapshot = { ...snapshot, failed: false }
+      } else if (body?.code === 'conflict') {
+        // 版本冲突：同步服务端最新视图，标记失败让用户用新版本重试
+        acceptView(body)
+        snapshot = { ...snapshot, failed: true }
+      } else {
+        snapshot = { ...snapshot, failed: true }
+      }
+      store.emit()
+      return body?.ok === true
+    } catch {
+      snapshot = { ...snapshot, failed: true }
+      store.emit()
+      return false
+    } finally {
+      snapshot = { ...snapshot, saving: false }
+      store.emit()
+    }
+  }
+
+  // 初拉 + 页面重新可见时刷新（外部改 settings.yaml 也能同步回来）
+  void load()
+  const onVisible = (): void => {
+    if (document.visibilityState === 'visible') void load()
+  }
+  document.addEventListener('visibilitychange', onVisible)
+  ctx.effect(() => () => document.removeEventListener('visibilitychange', onVisible), '@dsh-external/dsh-ocr: visibility refresh')
+
   const face = {
     hooks: { ocrCard: store },
-    setField: (field: string, value: unknown) => withSaveFlag(() => scope.set(field, value)).then(() => {}, () => {}),
-    unsetField: (field: string) => withSaveFlag(() => scope.unset(field)).then(() => {}, () => {}),
-    saveProvider: async (id: string, fields: Record<string, string>): Promise<boolean> => {
-      try {
-        await withSaveFlag(async () => {
-          const revision = scope.getSnapshot().revision
-          const ops: unknown[] = []
-          for (const field of PROVIDER_FIELDS) {
-            const text = fields[field.key] ?? ''
-            if (field.secret) {
-              if (text === '') continue
-              ops.push({ op: 'set', path: ['providers', id, field.key], value: text })
-              continue
-            }
-            if (text === '') ops.push({ op: 'unset', path: ['providers', id, field.key] })
-            else ops.push({ op: 'set', path: ['providers', id, field.key], value: text })
-          }
-          if (ops.length === 0) return
-          const response = await api.settings.mutate({
-            ns: SETTINGS_NS,
-            ops,
-            ...(revision === undefined ? {} : { expectedRevision: revision }),
-          })
-          if (response?.result?.ok !== true) throw new Error('settings write refused')
-        })
-        return true
-      } catch {
-        return false
+    setField: (field: string, value: unknown) =>
+      writeOps([{ op: 'set', path: [field], value }]).then(() => {}, () => {}),
+    unsetField: (field: string) =>
+      writeOps([{ op: 'unset', path: [field] }]).then(() => {}, () => {}),
+    saveProvider: (id: string, fields: Record<string, string>): Promise<boolean> => {
+      const ops: unknown[] = []
+      for (const field of PROVIDER_FIELDS) {
+        const text = fields[field.key] ?? ''
+        if (field.secret) {
+          if (text === '') continue
+          ops.push({ op: 'set', path: ['providers', id, field.key], value: text })
+          continue
+        }
+        if (text === '') ops.push({ op: 'unset', path: ['providers', id, field.key] })
+        else ops.push({ op: 'set', path: ['providers', id, field.key], value: text })
       }
+      return writeOps(ops)
     },
-    deleteProvider: async (id: string): Promise<boolean> => {
-      try {
-        await withSaveFlag(async () => {
-          const revision = scope.getSnapshot().revision
-          const response = await api.settings.mutate({
-            ns: SETTINGS_NS,
-            ops: [{ op: 'unset', path: ['providers', id] }],
-            ...(revision === undefined ? {} : { expectedRevision: revision }),
-          })
-          if (response?.result?.ok !== true) throw new Error('settings write refused')
-        })
-        return true
-      } catch {
-        return false
-      }
-    },
+    deleteProvider: (id: string): Promise<boolean> =>
+      writeOps([{ op: 'unset', path: ['providers', id] }]),
   }
 
   ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
